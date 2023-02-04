@@ -1,0 +1,2 @@
+[workspace]
+members = [ "mpt_lib","c_mpt_lib",]
