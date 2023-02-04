@@ -5,6 +5,7 @@ edition = "2021"
 description = "a function libaray for modern portfolio theroy"
 authors = ["rocky li <124215304@qq.com>"]
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/rockyliyang/mpt_libs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
