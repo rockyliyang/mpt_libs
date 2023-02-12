@@ -659,9 +659,6 @@ impl<'a> MPTCalculator<'a> {
     ///Add the values in same position for two arrays, the output is same size array
     ///Array = valueArray1 + valueArray2
     ///
-    ///#Arguments:
-    ///values2		    [in]	value array
-    ///output		    [out]	added array, the array size is equal to valueArraySize
     ///
     ///# Examples
     ///```
@@ -704,9 +701,6 @@ impl<'a> MPTCalculator<'a> {
     ///Subtract the values in same position for two arrays, the output is same size array
     ///Array = valueArray1 - valueArray2
     ///
-    ///#Arguments:
-    ///values2		    [in]	value array
-    ///output		    [out]	added array, the array size is equal to valueArraySize
     ///
     ///# Examples
     ///```
@@ -748,10 +742,6 @@ impl<'a> MPTCalculator<'a> {
 
     ///Multiply the values in same position for two arrays, the output is same size array
     ///Array = valueArray1 * valueArray2
-    ///
-    ///#Arguments:
-    ///values2		    [in]	value array
-    ///output		    [out]	added array, the array size is equal to valueArraySize
     ///
     ///Return Value:
     ///Return the error code
