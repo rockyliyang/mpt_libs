@@ -1,11 +1,12 @@
-use core::slice;
+use std::{collections::HashSet, ops::ControlFlow};
 
-use crate::enums::{self, Errors};
-pub struct MPTCalculator<'a> {
-    pub values: &'a [f64],
-    pub benchmark: &'a [f64],
-    pub riskfree: &'a [f64],
-}
+use float_cmp::approx_eq;
+
+use crate::{
+    date_util,
+    enums::{self, Errors},
+    MPTCalculator,
+};
 
 pub struct AvgCreditQualityCalculator {
     pub a0: [f64; 3],
@@ -30,7 +31,7 @@ pub struct InputDatas<'a> {
     pub riskfree: &'a [f64],
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct DataGroup {
     pub start: usize,
     pub end: usize,
@@ -81,45 +82,7 @@ pub(crate) struct RatioData {
     pub count: i32,
     pub ratio: i32,
 }
-pub fn check_and_convert<'a>(
-    values: *const f64,
-    bmk_values: *const f64,
-    riskfree_values: *const f64,
-    value_array_size: usize,
-    check_values: bool,
-    check_bmk: bool,
-    check_rf: bool,
-) -> Result<InputDatas<'a>, Errors> {
-    if values.is_null() || value_array_size == 0 {
-        return Err(Errors::ClErrorCodeInvalidPara);
-    }
-    if check_bmk && bmk_values.is_null() {
-        return Err(Errors::ClErrorCodeInvalidPara);
-    }
 
-    if check_rf && riskfree_values.is_null() {
-        return Err(Errors::ClErrorCodeInvalidPara);
-    }
-
-    let input = InputDatas {
-        values: unsafe { slice::from_raw_parts(values, value_array_size) },
-        benchmark: unsafe { slice::from_raw_parts(bmk_values, value_array_size) },
-        riskfree: unsafe { slice::from_raw_parts(riskfree_values, value_array_size) },
-    };
-
-    if check_values && input.values.iter().find(|x| !x.is_finite()) != None {
-        return Err(Errors::ClErrorCodeNoError);
-    }
-
-    if check_bmk && input.benchmark.iter().find(|x| !x.is_finite()) != None {
-        return Err(Errors::ClErrorCodeNoError);
-    }
-
-    if check_rf && input.riskfree.iter().find(|x| !x.is_finite()) != None {
-        return Err(Errors::ClErrorCodeNoError);
-    }
-    Ok(input)
-}
 pub fn get_annual_multiplier(freq: enums::ClFrequency, is_fd: bool) -> f64 {
     let mut multiplier = f64::NAN;
     if freq == enums::ClFrequency::ClFrequencyDaily {
@@ -189,10 +152,6 @@ pub fn is_sorted_array<T: std::cmp::PartialOrd>(data: &[T]) -> bool {
     true
 }
 
-const MIN_DOUBLE: f64 = 0.00001;
-pub fn is_eq_double(a: f64, b: f64) -> bool {
-    return (a - b).abs() < MIN_DOUBLE;
-}
 impl<'a> MPTCalculator<'a> {
     pub fn from(values: &'a [f64], benchmark: &'a [f64], riskfree: &'a [f64]) -> MPTCalculator<'a> {
         MPTCalculator {
@@ -223,12 +182,6 @@ impl<'a> MPTCalculator<'a> {
         }
     }
 
-    pub fn average_internal(values: &[f64], avg: &mut f64) -> Errors {
-        *avg = values.iter().filter(|x| (**x).is_finite()).sum::<f64>()
-            / values.iter().filter(|x| (**x).is_finite()).count() as f64;
-        return Errors::ClErrorCodeNoError;
-    }
-
     pub(crate) fn standard_deviation_internal(
         values: &[f64],
         freq: enums::ClFrequency,
@@ -236,7 +189,7 @@ impl<'a> MPTCalculator<'a> {
         standard_deviation_result: &mut f64,
     ) -> Errors {
         let mut mean = f64::NAN;
-        let ret = Self::average_internal(values, &mut mean);
+        let ret = MPTCalculator::from_v(values).average(&mut mean);
         if ret != Errors::ClErrorCodeNoError {
             return ret;
         }
@@ -277,6 +230,261 @@ impl<'a> MPTCalculator<'a> {
             }
         });
         return Errors::ClErrorCodeNoError;
+    }
+
+    pub(crate) fn convert_discreet_return_by_dri(
+        &self,
+        res: &mut Vec<f64>,
+        bmk_res: &mut Vec<f64>,
+        rf_res: &mut Vec<f64>,
+    ) {
+        if self.values.len() > 0 {
+            self.values
+                .iter()
+                .enumerate()
+                .scan(
+                    (f64::NAN, f64::NAN, f64::NAN, 0),
+                    |state: &mut (f64, f64, f64, i32), x: (usize, &f64)| {
+                        if state.3 == 0 {
+                            state.0 = *x.1;
+                            state.3 += 1;
+                        } else if state.0 != *x.1 {
+                            if !state.0.is_finite() || !x.1.is_finite() {
+                                res.push(f64::NAN);
+                            } else {
+                                res.push((x.1 / (state.0)).ln() * (1.0 / state.3 as f64));
+                            }
+                            state.0 = *x.1;
+
+                            if self.benchmark.len() > 0 && x.0 < self.benchmark.len() {
+                                if !state.1.is_finite() || !self.benchmark[x.0].is_finite() {
+                                    bmk_res.push(f64::NAN);
+                                } else {
+                                    bmk_res.push(
+                                        (self.benchmark[x.0] / (state.1)).ln()
+                                            * (1.0 / state.3 as f64),
+                                    );
+                                }
+                                state.1 = self.benchmark[x.0];
+                            }
+                            if self.riskfree.len() > 0 && x.0 < self.riskfree.len() {
+                                if !state.2.is_finite() || !self.riskfree[x.0].is_finite() {
+                                    rf_res.push(f64::NAN);
+                                } else {
+                                    rf_res.push(
+                                        (self.riskfree[x.0] / (state.2)).ln()
+                                            * (1.0 / state.3 as f64),
+                                    );
+                                }
+                                state.2 = self.riskfree[x.0];
+                            }
+
+                            state.3 = 1;
+                        } else {
+                            state.3 += 1;
+                        }
+                        Some(())
+                    },
+                )
+                .count();
+        }
+    }
+
+    pub(crate) fn convert_discreet_return_by_holiday(
+        &self,
+        start_date: i32,
+        holiday: &[i32],
+        res: &mut Vec<f64>,
+        bmk_res: &mut Vec<f64>,
+        rf_res: &mut Vec<f64>,
+    ) {
+        if self.values.len() > 0 {
+            res.reserve(self.values.len());
+            bmk_res.reserve(self.values.len());
+            rf_res.reserve(self.values.len());
+
+            let holiday_set: HashSet<&i32> = holiday.iter().collect();
+            let mut trade_days: Vec<usize> = Vec::with_capacity(self.values.len());
+            trade_days.push(0);
+            for i in 1..self.values.len() {
+                if date_util::is_weekend((i as i32 + start_date - 1) as u64)
+                    || holiday_set.get(&(i as i32 + start_date - 1)) != None
+                {
+                    trade_days.push(i);
+                }
+            }
+
+            trade_days
+                .iter()
+                .scan(0, |state, &x| {
+                    if *state != 0 {
+                        if !self.values[x].is_finite() || !self.values[*state].is_finite() {
+                            res.push(f64::NAN);
+                        } else {
+                            res.push(
+                                (self.values[x] / self.values[*state]).ln()
+                                    * (1.0 / (x - *state) as f64),
+                            );
+                        }
+
+                        if self.benchmark.len() > 0
+                            && x < self.benchmark.len()
+                            && *state < self.benchmark.len()
+                        {
+                            if !self.benchmark[x].is_finite() || !self.benchmark[*state].is_finite()
+                            {
+                                bmk_res.push(f64::NAN);
+                            } else {
+                                bmk_res.push(
+                                    (self.benchmark[x] / self.benchmark[*state]).ln()
+                                        * (1.0 / (x - *state) as f64),
+                                );
+                            }
+                        }
+
+                        if self.riskfree.len() > 0
+                            && x < self.riskfree.len()
+                            && *state < self.riskfree.len()
+                        {
+                            if !self.riskfree[x].is_finite() || !self.riskfree[*state].is_finite() {
+                                rf_res.push(f64::NAN);
+                            } else {
+                                rf_res.push(
+                                    (self.riskfree[x] / self.riskfree[*state]).ln()
+                                        * (1.0 / (x - *state) as f64),
+                                );
+                            }
+                        }
+                    }
+                    *state = x;
+                    Some(())
+                })
+                .count();
+        }
+    }
+
+    pub(crate) fn convert_discreet_return(&self, is_dri: bool, result: &mut Vec<f64>) {
+        if self.values.len() > 0 {
+            result.reserve(self.values.len());
+            if is_dri {
+                self.values
+                    .iter()
+                    .scan((f64::NAN, 0), |state, &x| {
+                        if state.1 == 0 {
+                            state.0 = x;
+                            state.1 += 1;
+                        } else if state.0 != x {
+                            if !state.0.is_finite() || !x.is_finite() {
+                                result.push(f64::NAN);
+                            } else {
+                                result.push((x / (state.0)).ln() * (1.0 / state.1 as f64));
+                            }
+                            state.0 = x;
+                            state.1 = 1;
+                        } else {
+                            state.1 += 1;
+                        }
+                        Some(())
+                    })
+                    .count();
+            } else {
+                self.values
+                    .iter()
+                    .for_each(|v| result.push((1.0 + v / 100.0).ln()));
+            }
+        }
+    }
+
+    pub(crate) fn calc_avg_excess_return(&self, avg_excess_return: &mut f64) -> Errors {
+        let mut sum_excess_return = 0.0;
+        let mut count = 0;
+        if self
+            .values
+            .iter()
+            .enumerate()
+            .try_for_each(|v| {
+                if !v.1.is_finite() || !self.riskfree[v.0].is_finite() {
+                    return ControlFlow::Break(());
+                } else {
+                    sum_excess_return += v.1 - self.riskfree[v.0];
+                    count += 1;
+                    return ControlFlow::Continue(());
+                }
+            })
+            .is_break()
+        {
+            return Errors::ClErrorCodeCcFaild;
+        }
+
+        if count == 0 {
+            return Errors::ClErrorCodeCcFaild;
+        }
+        *avg_excess_return = sum_excess_return / count as f64;
+        return Errors::ClErrorCodeNoError;
+    }
+
+    pub(crate) fn total_return_accumulat(values: &[f64], result: &mut f64) -> Errors {
+        if values.len() == 0 {
+            return Errors::ClErrorCodeInvalidPara;
+        }
+        *result = f64::NAN;
+        let mut acct_return = 1.0;
+        if values
+            .iter()
+            .try_for_each(|v| {
+                if !v.is_finite() {
+                    return ControlFlow::Break(());
+                } else {
+                    acct_return *= 1.0 + v / 100.0;
+                    return ControlFlow::Continue(());
+                }
+            })
+            .is_break()
+        {
+            return Errors::ClErrorCodeNoError;
+        }
+        *result = (acct_return - 1.0) * 100.0;
+
+        return Errors::ClErrorCodeNoError;
+    }
+
+    pub(crate) fn calc_annu_total_return(
+        values: &[f64],
+        riskfree: &[f64],
+        freq: enums::ClFrequency,
+        annu_total_return: &mut f64,
+        annu_rf_total_return: &mut f64,
+    ) -> Errors {
+        let mut total_return = f64::NAN;
+        let mut rf_total_return = f64::NAN;
+        Self::total_return_accumulat(values, &mut total_return);
+        Self::total_return_accumulat(riskfree, &mut rf_total_return);
+
+        if !total_return.is_finite() || !rf_total_return.is_finite() {
+            return Errors::ClErrorCodeCcFaild;
+        }
+
+        *annu_total_return = annualize_return(total_return, freq, values.len() as f64, true);
+        *annu_rf_total_return = annualize_return(rf_total_return, freq, values.len() as f64, true);
+        return Errors::ClErrorCodeNoError;
+    }
+
+    pub const MIN_DOUBLE: f64 = 0.000009;
+    pub fn is_eq_double(a: f64, b: f64) -> bool {
+        //return (a - b).abs() < MIN_DOUBLE;
+        return approx_eq!(f64, a, b, epsilon = Self::MIN_DOUBLE);
+    }
+
+    pub fn is_eq_double_array(a: &[f64], b: &[f64]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        for i in 0..a.len() {
+            if !Self::is_eq_double(a[i], b[i]) {
+                return false;
+            }
+        }
+        true
     }
 }
 
